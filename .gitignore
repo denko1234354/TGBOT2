@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.tgcloud/
+node_modules/
