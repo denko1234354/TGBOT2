@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from vault import collection_capacity, safe_capacity
 
@@ -41,15 +42,18 @@ class UserState:
 class UserStorage:
     def __init__(self, base_dir: str) -> None:
         self._path = os.path.join(base_dir, DATA_DIR, USERS_FILE)
+        self._feedback_path = os.path.join(base_dir, DATA_DIR, "feedback.json")
         self._lock = asyncio.Lock()
+        self._feedback_lock = asyncio.Lock()
         self._users: dict[str, UserState] = {}
+        self._feedback: list[dict[str, object]] = []
 
     async def load(self) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
-        if not os.path.isfile(self._path):
-            return
-        with open(self._path, encoding="utf-8") as f:
-            raw = json.load(f)
+        raw = {}
+        if os.path.isfile(self._path):
+            with open(self._path, encoding="utf-8") as f:
+                raw = json.load(f)
         for uid, data in raw.items():
             self._users[uid] = UserState(
                 balance=int(data.get("balance", START_BALANCE)),
@@ -66,6 +70,27 @@ class UserStorage:
                 collection_items=list(data.get("collection_items", [])),
                 collection_pick=list(data.get("collection_pick", [])),
             )
+        if os.path.isfile(self._feedback_path):
+            with open(self._feedback_path, encoding="utf-8") as f:
+                raw_feedback = json.load(f)
+            if isinstance(raw_feedback, list):
+                self._feedback = [item for item in raw_feedback if isinstance(item, dict)]
+
+    async def add_feedback(self, user_id: int, display_name: str, text: str) -> None:
+        async with self._feedback_lock:
+            self._feedback.append({
+                "user_id": user_id,
+                "display_name": display_name,
+                "text": text,
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="minutes"),
+            })
+            os.makedirs(os.path.dirname(self._feedback_path), exist_ok=True)
+            with open(self._feedback_path, "w", encoding="utf-8") as f:
+                json.dump(self._feedback, f, ensure_ascii=False, indent=2)
+
+    async def list_feedback(self) -> list[dict[str, object]]:
+        async with self._feedback_lock:
+            return [dict(item) for item in reversed(self._feedback)]
 
     async def save(self) -> None:
         async with self._lock:

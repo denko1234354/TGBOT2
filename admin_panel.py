@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -25,6 +26,7 @@ _storage: UserStorage | None = None
 
 PLAYERS_PER_PAGE = 6
 MONEY_PRESETS = (1_000, 5_000, 25_000, 100_000)
+FEEDBACK_CHUNK_SIZE = 600
 
 INT_FIELDS = {
     "global_roulette_cost",
@@ -86,6 +88,7 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard"),
             ],
             [InlineKeyboardButton(text="🔍 Оценить", callback_data="menu:rate_hint")],
+            [InlineKeyboardButton(text="📨 Отзыв / предложение", callback_data="menu:feedback")],
             [InlineKeyboardButton(text="🛠 Админка", callback_data="menu:admin")],
         ]
     )
@@ -95,6 +98,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Игроки", callback_data="admin:pls:0")],
+            [InlineKeyboardButton(text="📨 Отзывы и предложения", callback_data="admin:feedback:0")],
             [InlineKeyboardButton(text="⚙️ Цены и шансы", callback_data="admin:cfg")],
             [InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard")],
             [InlineKeyboardButton(text="💣 Вайп всех", callback_data="admin:wipe")],
@@ -260,6 +264,57 @@ async def _apply_delta(target_id: int, delta: int) -> tuple[int, int]:
     return before, after
 
 
+async def _show_feedback(callback: CallbackQuery, item_index: int, part_index: int = 0) -> None:
+    assert _storage is not None
+    items = await _storage.list_feedback()
+    if not items:
+        lines = ["📨 <b>Отзывы и предложения</b> · 0", "", "Пока отзывов нет."]
+        rows = [[InlineKeyboardButton(text="⬅️ Админка", callback_data="menu:admin")]]
+        await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
+
+    pages: list[tuple[int, int]] = []
+    for idx, item in enumerate(items):
+        body = str(item.get("text") or "")
+        parts = max(1, (len(body) + FEEDBACK_CHUNK_SIZE - 1) // FEEDBACK_CHUNK_SIZE)
+        pages.extend((idx, part) for part in range(parts))
+    requested = (max(0, min(item_index, len(items) - 1)), max(0, part_index))
+    if requested not in pages:
+        requested = (requested[0], 0)
+    page = pages.index(requested)
+    item_index, part_index = pages[page]
+    item = items[item_index]
+    raw_body = str(item.get("text") or "")
+    part_count = max(1, (len(raw_body) + FEEDBACK_CHUNK_SIZE - 1) // FEEDBACK_CHUNK_SIZE)
+    body = escape(raw_body[part_index * FEEDBACK_CHUNK_SIZE : (part_index + 1) * FEEDBACK_CHUNK_SIZE])
+    name = escape(str(item.get("display_name") or "Игрок")[:48])
+    uid = escape(str(item.get("user_id") or "—"))
+    created_at = escape(str(item.get("created_at") or ""))
+    lines = [
+        f"📨 <b>Отзывы и предложения</b> · {len(items)}",
+        f"Сообщение {item_index + 1} из {len(items)} · часть {part_index + 1} из {part_count}",
+        "",
+        f"<b>{name}</b> · <code>{uid}</code> · <i>{created_at}</i>",
+        "",
+        body,
+    ]
+    rows: list[list[InlineKeyboardButton]] = []
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        prev_item, prev_part = pages[page - 1]
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:feedback:{prev_item}:{prev_part}"))
+    if page < len(pages) - 1:
+        next_item, next_part = pages[page + 1]
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:feedback:{next_item}:{next_part}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ Админка", callback_data="menu:admin")])
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
 @admin_router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext) -> None:
     if await _require_admin(message) is None:
@@ -275,6 +330,17 @@ async def cb_menu_admin(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
     await callback.message.edit_text(admin_home_text(), reply_markup=_admin_kb())
+
+
+@admin_router.callback_query(F.data.startswith("admin:feedback:"))
+async def cb_admin_feedback(callback: CallbackQuery) -> None:
+    if await _require_admin(callback) is None or not callback.data:
+        return
+    await callback.answer()
+    parts = callback.data.split(":")
+    item_index = int(parts[2]) if len(parts) > 2 else 0
+    part_index = int(parts[3]) if len(parts) > 3 else 0
+    await _show_feedback(callback, item_index, part_index)
 
 
 @admin_router.callback_query(F.data == "admin:close")

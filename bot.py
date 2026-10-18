@@ -9,6 +9,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
 from dotenv import load_dotenv
 
@@ -59,6 +61,10 @@ COLLECTION_PAGE_SIZE = 3
 REGION_ALL = "all"
 
 
+class FeedbackStates(StatesGroup):
+    waiting_text = State()
+
+
 def plate_to_key(plate: Plate) -> str:
     return plate_storage_key(plate)
 
@@ -98,6 +104,7 @@ def main_menu_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard"),
         ],
         [InlineKeyboardButton(text="🔍 Оценить", callback_data="menu:rate_hint")],
+        [InlineKeyboardButton(text="📨 Отзыв / предложение", callback_data="menu:feedback")],
     ]
     if is_admin(user_id):
         rows.append([InlineKeyboardButton(text="🛠 Админка", callback_data="menu:admin")])
@@ -301,6 +308,53 @@ async def cmd_balance(message: Message) -> None:
     if not message.from_user:
         return
     await message.answer(await profile_line(message.from_user.id))
+
+
+@router.callback_query(F.data == "menu:feedback")
+async def cb_feedback_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message:
+        await callback.answer()
+        return
+    await state.set_state(FeedbackStates.waiting_text)
+    await callback.answer()
+    await callback.message.edit_text(
+        "📨 Напишите одним сообщением отзыв или предложение (до 2000 символов).\n"
+        "Его сможет прочитать только администратор.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="feedback:cancel")]]
+        ),
+    )
+
+
+@router.callback_query(F.data == "feedback:cancel")
+async def cb_feedback_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not callback.from_user or not callback.message:
+        await callback.answer()
+        return
+    await callback.answer("Отменено")
+    text = WELCOME + "\n" + await profile_line(callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=main_menu_keyboard(callback.from_user.id))
+
+
+@router.message(FeedbackStates.waiting_text, F.text)
+async def msg_feedback_submit(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("Сообщение пустое. Напишите отзыв или предложение.")
+        return
+    if len(body) > 2000:
+        await message.answer("Слишком длинное сообщение. Максимум — 2000 символов.")
+        return
+    user = await storage.get(message.from_user.id)
+    await storage.add_feedback(message.from_user.id, user.display_name or message.from_user.full_name, body)
+    await state.clear()
+    await message.answer(
+        "✅ Спасибо! Отзыв отправлен администратору.",
+        reply_markup=main_menu_keyboard(message.from_user.id),
+    )
 
 
 @router.message(Command("rate"))
