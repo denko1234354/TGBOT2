@@ -538,7 +538,12 @@ async def cb_vault_store(callback: CallbackQuery) -> None:
     await callback.answer("Сохранено в сейфе 🔐")
     await callback.message.edit_text(
         f"🔐 Номер убран в сейф:\n{format_plate_short(key)}",
-        reply_markup=main_menu_keyboard(callback.from_user.id),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🎰 Крутить ещё раз", callback_data="spin:repeat")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home")],
+            ]
+        ),
     )
 
 
