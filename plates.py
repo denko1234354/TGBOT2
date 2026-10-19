@@ -593,6 +593,13 @@ _PARSE_MIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LATIN_PLATE_LETTERS = str.maketrans({
+    "A": "А", "B": "В", "E": "Е", "K": "К", "M": "М", "H": "Н",
+    "O": "О", "P": "Р", "C": "С", "T": "Т", "Y": "У", "X": "Х",
+    "a": "А", "b": "В", "e": "Е", "k": "К", "m": "М", "h": "Н",
+    "o": "О", "p": "Р", "c": "С", "t": "Т", "y": "У", "x": "Х",
+})
+
 
 def _extract_kind_prefix(text: str) -> tuple[str, str]:
     parts = text.strip().split(maxsplit=1)
@@ -609,6 +616,11 @@ def parse_plate_text(text: str) -> Plate | None:
     cleaned = text.replace("|", " ").strip()
     kind, body = _extract_kind_prefix(cleaned)
     body = body.strip()
+
+    # Standard Russian plates use Cyrillic letters that look like Latin ones;
+    # users often type them with an English keyboard layout.
+    if kind != "diplomatic":
+        body = body.translate(_LATIN_PLATE_LETTERS)
 
     m = _PARSE_DIPLO_RE.match(body)
     if m or kind == "diplomatic":
