@@ -15,6 +15,9 @@ KIND_CIVILIAN = "civilian"
 
 # Множитель стоимости региона при продаже номера.
 REGION_SELL_MULT: dict[int, float] = {1: 1.45, 2: 1.2, 3: 1.0, 4: 0.85}
+# Original-game screenshots show a wide price gap between epic and legendary
+# plates. This premium also keeps legends above epics across region tiers.
+LEGENDARY_PRICE_MULTIPLIER = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,10 +564,11 @@ def evaluate_plate(plate: Plate) -> PlateEvaluation:
     from game_config import cfg
 
     region_mult = REGION_SELL_MULT.get(tier, 1.0)
+    rarity = determine_rarity(plate, specs, mult)
     sell = int(base * mult * region_mult * cfg().sell_price_multiplier)
     sell = max(sell, 10)
-
-    rarity = determine_rarity(plate, specs, mult)
+    if rarity.id == RARITY_LEGENDARY.id:
+        sell *= LEGENDARY_PRICE_MULTIPLIER
 
     return PlateEvaluation(
         plate=plate,
@@ -684,8 +688,12 @@ def format_evaluation(ev: PlateEvaluation) -> str:
         f"База региона: <b>{ev.base_value}</b> ₽",
         f"Регион: <b>×{region_mult:.2f}</b> (престиж кода {ev.plate.region_code})",
         f"Итоговый множитель комбо: <b>×{ev.total_multiplier:.2f}</b>",
-        f"💵 Продажа: <b>{ev.sell_price}</b> ₽",
     ]
+    if ev.rarity.id == RARITY_LEGENDARY.id:
+        lines.append(
+            f"🏆 Легендарная редкость: <b>×{LEGENDARY_PRICE_MULTIPLIER}</b> к цене"
+        )
+    lines.append(f"💵 Продажа: <b>{ev.sell_price}</b> ₽")
     combo_specs = [s for s in ev.specialties if not s.id.startswith("kind_")]
     kind_specs = [s for s in ev.specialties if s.id.startswith("kind_")]
     if kind_specs or combo_specs:

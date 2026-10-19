@@ -8,3 +8,4 @@ node_modules/
 data/*.json
 users-railway-backup.json
 game-config-railway-backup.json
+users-volume-check.json

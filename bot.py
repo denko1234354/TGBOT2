@@ -110,7 +110,10 @@ def main_menu_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎰 Крутить", callback_data="menu:spin")],
         [
             InlineKeyboardButton(text="💰 Баланс", callback_data="menu:balance"),
-            InlineKeyboardButton(text="🔐 Сейф", callback_data="menu:vault"),
+        ],
+        [
+            InlineKeyboardButton(text="🔐 Сейф", callback_data="vlt:safe:0"),
+            InlineKeyboardButton(text="📚 Коллекция", callback_data="vlt:col:0"),
         ],
         [
             InlineKeyboardButton(text="📖 Правила", callback_data="menu:rules"),
@@ -1394,8 +1397,9 @@ async def cb_sell(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         f"💵 Продано: {rarity_badge(evaluation.rarity)} · <code>{plate.formatted()}</code>\n"
         f"Получено: <b>{price}</b> ₽\n"
-        f"Баланс: <b>{new_balance}</b> ₽",
-        reply_markup=main_menu_keyboard(callback.from_user.id),
+        f"Баланс: <b>{new_balance}</b> ₽\n\n"
+        f"{await _spin_menu_text(callback.from_user.id)}",
+        reply_markup=spin_actions_keyboard(user.selected_region),
     )
 
 
