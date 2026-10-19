@@ -28,16 +28,11 @@ jobs:
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
-      - name: Link Railway production service
-        run: >-
-          railway link
-          --project "$RAILWAY_PROJECT_ID"
-          --environment "$RAILWAY_ENVIRONMENT_ID"
-          --service "$RAILWAY_SERVICE_ID"
-          --json
-
       - name: Deploy this branch to production
         run: >-
           railway up
+          --project "$RAILWAY_PROJECT_ID"
+          --environment "$RAILWAY_ENVIRONMENT_ID"
+          --service "$RAILWAY_SERVICE_ID"
           --ci
           --message "${GITHUB_REF_NAME} @ ${GITHUB_SHA}"
