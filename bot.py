@@ -115,6 +115,7 @@ def main_menu_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔐 Сейф", callback_data="vlt:safe:0"),
             InlineKeyboardButton(text="📚 Коллекция", callback_data="vlt:col:0"),
         ],
+        [InlineKeyboardButton(text="⬆️ Улучшения сейфа и коллекции", callback_data="menu:vault")],
         [
             InlineKeyboardButton(text="📖 Правила", callback_data="menu:rules"),
             InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard"),
@@ -547,12 +548,11 @@ async def cb_vault_store(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("vlt:safe:"))
-async def cb_vault_safe_list(callback: CallbackQuery) -> None:
+async def _show_safe_list(callback: CallbackQuery, page: int, *, answer: bool = True) -> None:
     if not callback.from_user or not callback.message or not callback.data:
-        await callback.answer()
+        if answer:
+            await callback.answer()
         return
-    page = int(callback.data.split(":")[2])
     user = await storage.get(callback.from_user.id)
     items = sorted_stored(user.safe_items)
     total_pages = max(1, (len(items) + VAULT_PAGE_SIZE - 1) // VAULT_PAGE_SIZE)
@@ -578,7 +578,11 @@ async def cb_vault_safe_list(callback: CallbackQuery) -> None:
                 InlineKeyboardButton(
                     text=f"💵 Продать #{global_idx + 1}",
                     callback_data=f"vlt:sellask:{plate_key_token(item.key)}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text=f"📚 В коллекцию #{global_idx + 1}",
+                    callback_data=f"vlt:stocol:{plate_key_token(item.key)}:{page}",
+                ),
             ]
         )
     nav = _paginate_nav("vlt:safe", page, total_pages)
@@ -586,8 +590,47 @@ async def cb_vault_safe_list(callback: CallbackQuery) -> None:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:vault")])
 
-    await callback.answer()
+    if answer:
+        await callback.answer()
     await callback.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith("vlt:safe:"))
+async def cb_vault_safe_list(callback: CallbackQuery) -> None:
+    if not callback.data:
+        await callback.answer()
+        return
+    page = int(callback.data.split(":")[2])
+    await _show_safe_list(callback, page)
+
+
+@router.callback_query(F.data.startswith("vlt:stocol:"))
+async def cb_safe_to_collection(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.message or not callback.data:
+        await callback.answer()
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Не удалось найти номер", show_alert=True)
+        return
+    key = plate_key_from_token(parts[2])
+    if key is None:
+        await callback.answer("Не удалось найти номер", show_alert=True)
+        return
+    try:
+        page = int(parts[3])
+    except ValueError:
+        page = 0
+
+    result = await storage.move_safe_to_collection(callback.from_user.id, key)
+    if result == "full":
+        await callback.answer("Коллекция заполнена — сначала улучшите её", show_alert=True)
+        return
+    if result != "moved":
+        await callback.answer("Номер уже не находится в сейфе", show_alert=True)
+        return
+    await callback.answer("Номер перемещён в коллекцию 📚")
+    await _show_safe_list(callback, page, answer=False)
 
 
 def _collection_sorted(user) -> list:

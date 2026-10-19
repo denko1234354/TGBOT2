@@ -321,6 +321,24 @@ class UserStorage:
             user.collection_pick.remove(plate_key)
         return True
 
+    async def move_safe_to_collection(self, user_id: int, plate_key: str) -> str:
+        """Move a plate from the safe into the collection if there is room."""
+        async with self._lock:
+            user = self._users.get(str(user_id))
+            if user is None or plate_key not in user.safe_items:
+                return "missing"
+
+            visible_after = (set(user.collection_items) - set(user.safe_items)) | {plate_key}
+            if len(visible_after) > collection_capacity(user.collection_level):
+                return "full"
+
+            user.safe_items.remove(plate_key)
+            if plate_key not in user.collection_items:
+                user.collection_items.append(plate_key)
+
+        await self.save()
+        return "moved"
+
     def remove_collection_item(self, user: UserState, plate_key: str) -> bool:
         if plate_key not in user.collection_items:
             return False
