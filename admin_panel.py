@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -27,6 +29,7 @@ _storage: UserStorage | None = None
 PLAYERS_PER_PAGE = 6
 MONEY_PRESETS = (1_000, 5_000, 25_000, 100_000)
 FEEDBACK_CHUNK_SIZE = 600
+_BROADCAST_LOCK = asyncio.Lock()
 
 INT_FIELDS = {
     "global_roulette_cost",
@@ -49,6 +52,7 @@ class AdminStates(StatesGroup):
     waiting_price_list = State()
     waiting_search = State()
     waiting_promo = State()
+    waiting_broadcast = State()
 
 
 def init_admin_panel(storage: UserStorage) -> set[int]:
@@ -100,6 +104,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Игроки", callback_data="admin:pls:0")],
+            [InlineKeyboardButton(text="📣 Рассылка игрокам", callback_data="admin:broadcast")],
             [InlineKeyboardButton(text="📨 Отзывы и предложения", callback_data="admin:feedback:0")],
             [InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin:promos")],
             [InlineKeyboardButton(text="⚙️ Цены и шансы", callback_data="admin:cfg")],
@@ -324,6 +329,109 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(admin_home_text(), reply_markup=_admin_kb())
+
+
+@admin_router.callback_query(F.data == "admin:broadcast")
+async def cb_broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _require_admin(callback) is None:
+        return
+    await state.set_state(AdminStates.waiting_broadcast)
+    await callback.answer()
+    await callback.message.edit_text(
+        "📣 Напишите текст для рассылки всем игрокам. Он будет отправлен как обычный текст.\n"
+        "Максимум — 4000 символов. Перед отправкой появится подтверждение.",
+        reply_markup=_cancel_kb("admin:broadcast:cancel"),
+    )
+
+
+@admin_router.callback_query(F.data == "admin:broadcast:cancel")
+async def cb_broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _require_admin(callback) is None:
+        return
+    await state.clear()
+    await callback.answer("Рассылка отменена")
+    await callback.message.edit_text(admin_home_text(), reply_markup=_admin_kb())
+
+
+@admin_router.message(AdminStates.waiting_broadcast, F.text)
+async def admin_broadcast_preview(message: Message, state: FSMContext) -> None:
+    if await _require_admin(message) is None:
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Текст пустой. Отправьте сообщение для рассылки.")
+        return
+    if len(text.encode("utf-16-le")) // 2 > 4000:
+        await message.answer("Слишком длинное сообщение. Максимум — 4000 символов.")
+        return
+    assert _storage is not None
+    players = await _storage.list_players()
+    await state.update_data(broadcast_text=text, broadcast_count=len(players))
+    await state.set_state(None)
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Отправить ({len(players)} игрокам)", callback_data="admin:broadcast:confirm")],
+        [InlineKeyboardButton(text="↩️ Отмена", callback_data="admin:broadcast:cancel")],
+    ])
+    preview = text if len(text) <= 1800 else text[:1800] + "\n… (предпросмотр обрезан)"
+    await message.answer(
+        f"Предпросмотр рассылки · получателей: {len(players)}\n\n{preview}",
+        reply_markup=markup,
+    )
+
+
+@admin_router.callback_query(F.data == "admin:broadcast:confirm")
+async def cb_broadcast_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if await _require_admin(callback) is None:
+        return
+    if _BROADCAST_LOCK.locked():
+        await callback.answer("Рассылка уже выполняется", show_alert=True)
+        return
+    await _BROADCAST_LOCK.acquire()
+    try:
+        data = await state.get_data()
+        text = str(data.get("broadcast_text") or "")
+        if not text:
+            await callback.answer("Черновик рассылки не найден", show_alert=True)
+            return
+        await state.clear()
+        assert _storage is not None
+        players = await _storage.list_players()
+        await callback.answer("Рассылка началась")
+        if callback.message:
+            await callback.message.edit_text(
+                f"📣 Отправляю сообщение игрокам: 0/{len(players)}",
+                parse_mode=None,
+            )
+        sent = 0
+        failed = 0
+        for index, (user_id, _user) in enumerate(players, start=1):
+            while True:
+                try:
+                    await bot.send_message(chat_id=int(user_id), text=text, parse_mode=None)
+                    sent += 1
+                    break
+                except TelegramRetryAfter as exc:
+                    await asyncio.sleep(exc.retry_after + 0.2)
+                except TelegramAPIError:
+                    failed += 1
+                    break
+            if index % 25 == 0 or index == len(players):
+                if callback.message:
+                    await callback.message.edit_text(
+                        f"📣 Рассылка: {index}/{len(players)}\n"
+                        f"✅ Доставлено: {sent}\n❌ Не доставлено: {failed}",
+                        parse_mode=None,
+                    )
+            await asyncio.sleep(0.05)
+        if callback.message:
+            await callback.message.edit_text(
+                f"✅ Рассылка завершена.\nПолучателей: {len(players)}\n"
+                f"Доставлено: {sent}\nНе доставлено: {failed}",
+                reply_markup=_admin_kb(),
+                parse_mode=None,
+            )
+    finally:
+        _BROADCAST_LOCK.release()
 
 
 async def _show_promos(target: Message | CallbackQuery) -> None:
