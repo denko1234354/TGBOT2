@@ -192,18 +192,14 @@ def after_spin_keyboard(plate_key: str) -> InlineKeyboardMarkup:
     )
 
 
-def vault_menu_keyboard() -> InlineKeyboardMarkup:
+def upgrades_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🔐 Содержимое сейфа", callback_data="vlt:safe:0"),
-                InlineKeyboardButton(text="📚 Коллекция", callback_data="vlt:col:0"),
-            ],
             [
                 InlineKeyboardButton(text="⬆️ Улучшить сейф", callback_data="vlt:upsafe"),
                 InlineKeyboardButton(text="⬆️ Улучшить коллекцию", callback_data="vlt:upcol"),
             ],
-            [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:home")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home")],
         ]
     )
 
@@ -244,7 +240,7 @@ async def apply_spin_progress(user_id: int, plate_key: str, sell_price: int, rar
     await storage.update(user_id, **patch)
 
 
-async def build_vault_home_text(user_id: int) -> str:
+async def build_upgrades_text(user_id: int) -> str:
     user = await storage.get(user_id)
     visible = storage.visible_collection(user)
     coll_value = collection_total_value(visible, user.collection_level)
@@ -257,8 +253,7 @@ async def build_vault_home_text(user_id: int) -> str:
         up_lines.append(f"⬆️ Коллекция → ур. {user.collection_level + 1}: <b>{c_up}</b> ₽")
     upgrades = "\n".join(up_lines) if up_lines else "Все улучшения куплены."
     return (
-        "🔐 <b>Сейф и коллекция</b>\n\n"
-        "В сейфе номера <b>нельзя продать случайно</b> — только через подтверждение в меню сейфа.\n\n"
+        "⬆️ <b>Улучшения сейфа и коллекции</b>\n\n"
         f"{vault_summary(user.safe_level, user.collection_level, len(user.safe_items), len(visible))}\n"
         f"💎 Ценность коллекции: <b>{coll_value:,}</b> ₽\n\n{upgrades}".replace(",", " ")
     )
@@ -512,8 +507,8 @@ async def cb_vault_menu(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await callback.message.edit_text(
-        await build_vault_home_text(callback.from_user.id),
-        reply_markup=vault_menu_keyboard(),
+        await build_upgrades_text(callback.from_user.id),
+        reply_markup=upgrades_keyboard(),
     )
 
 
@@ -542,9 +537,8 @@ async def cb_vault_store(callback: CallbackQuery) -> None:
     await storage.save()
     await callback.answer("Сохранено в сейфе 🔐")
     await callback.message.edit_text(
-        f"🔐 Номер убран в сейф:\n{format_plate_short(key)}\n\n"
-        + await build_vault_home_text(callback.from_user.id),
-        reply_markup=vault_menu_keyboard(),
+        f"🔐 Номер убран в сейф:\n{format_plate_short(key)}",
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -588,7 +582,7 @@ async def _show_safe_list(callback: CallbackQuery, page: int, *, answer: bool = 
     nav = _paginate_nav("vlt:safe", page, total_pages)
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:vault")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
 
     if answer:
         await callback.answer()
@@ -735,7 +729,7 @@ async def _show_collection(
                     InlineKeyboardButton(text="⚡ Продать всё", callback_data="vlt:cfast"),
                 ]
             )
-        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:vault")])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:home")])
 
     if answer:
         await callback.answer()
@@ -922,7 +916,9 @@ async def cb_collection_fast_ok(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         f"⚡ Продано <b>{len(sold)}</b> номеров за <b>{total}</b> ₽\n"
         f"Баланс: <b>{new_balance}</b> ₽",
-        reply_markup=vault_menu_keyboard(),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📚 К коллекции", callback_data="vlt:col:0")]]
+        ),
     )
 
 
@@ -1036,7 +1032,9 @@ async def cb_vault_sell_ok(callback: CallbackQuery) -> None:
     await callback.answer(f"+{price} ₽")
     await callback.message.edit_text(
         f"💵 Продано из сейфа за <b>{price}</b> ₽\nБаланс: <b>{new_balance}</b> ₽",
-        reply_markup=vault_menu_keyboard(),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔐 К сейфу", callback_data="vlt:safe:0")]]
+        ),
     )
 
 
@@ -1077,7 +1075,7 @@ async def cb_vault_upgrade_safe_ask(callback: CallbackQuery) -> None:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text=f"✅ Купить за {price_fmt} ₽", callback_data="vlt:upsafe:ok")],
-                [InlineKeyboardButton(text="↩️ Отмена", callback_data="menu:vault")],
+                [InlineKeyboardButton(text="↩️ Отмена", callback_data="menu:home")],
             ]
         )
     else:
@@ -1085,7 +1083,7 @@ async def cb_vault_upgrade_safe_ask(callback: CallbackQuery) -> None:
         lines_text.append(f"⚠️ <b>Недостаточно средств!</b> Не хватает: <b>{diff_fmt}</b> ₽")
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="↩️ Назад в сейф", callback_data="menu:vault")]
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home")]
             ]
         )
 
@@ -1119,9 +1117,8 @@ async def cb_vault_upgrade_safe_ok(callback: CallbackQuery) -> None:
         f"Новый уровень: <b>{new_level}</b>/{MAX_SAFE_LEVEL}\n"
         f"Вместимость: <b>{cap}</b> мест\n"
         f"Списано: <b>{price:,}</b> ₽\n"
-        f"Текущий баланс: <b>{new_balance:,}</b> ₽\n\n".replace(",", " ")
-        + await build_vault_home_text(callback.from_user.id),
-        reply_markup=vault_menu_keyboard(),
+        f"Текущий баланс: <b>{new_balance:,}</b> ₽".replace(",", " "),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
@@ -1166,7 +1163,7 @@ async def cb_vault_upgrade_col_ask(callback: CallbackQuery) -> None:
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text=f"✅ Купить за {price_fmt} ₽", callback_data="vlt:upcol:ok")],
-                [InlineKeyboardButton(text="↩️ Отмена", callback_data="menu:vault")],
+                [InlineKeyboardButton(text="↩️ Отмена", callback_data="menu:home")],
             ]
         )
     else:
@@ -1174,7 +1171,7 @@ async def cb_vault_upgrade_col_ask(callback: CallbackQuery) -> None:
         lines_text.append(f"⚠️ <b>Недостаточно средств!</b> Не хватает: <b>{diff_fmt}</b> ₽")
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="↩️ Назад в сейф", callback_data="menu:vault")]
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu:home")]
             ]
         )
 
@@ -1213,9 +1210,8 @@ async def cb_vault_upgrade_col_ok(callback: CallbackQuery) -> None:
         f"Слотов: <b>{collection_capacity(new_level)}</b> · "
         f"Бонус ценности: <b>×{collection_bonus_mult(new_level):.2f}</b>\n"
         f"Списано: <b>{price:,}</b> ₽\n"
-        f"Текущий баланс: <b>{new_balance:,}</b> ₽\n\n".replace(",", " ")
-        + await build_vault_home_text(callback.from_user.id),
-        reply_markup=vault_menu_keyboard(),
+        f"Текущий баланс: <b>{new_balance:,}</b> ₽".replace(",", " "),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
     )
 
 
