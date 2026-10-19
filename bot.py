@@ -65,12 +65,25 @@ class FeedbackStates(StatesGroup):
     waiting_text = State()
 
 
+class PromoStates(StatesGroup):
+    waiting_code = State()
+
+
 def plate_to_key(plate: Plate) -> str:
     return plate_storage_key(plate)
 
 
 def plate_from_key(key: str) -> Plate | None:
     return plate_from_storage_key(key)
+
+
+def plate_key_token(key: str) -> str:
+    return key.replace(":", "~")
+
+
+def plate_key_from_token(token: str) -> str | None:
+    key = token.replace("~", ":")
+    return key if plate_from_key(key) is not None else None
 
 
 def is_all_regions(code: str | None) -> bool:
@@ -104,6 +117,7 @@ def main_menu_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard"),
         ],
         [InlineKeyboardButton(text="🔍 Оценить", callback_data="menu:rate_hint")],
+        [InlineKeyboardButton(text="🎟 Промокод", callback_data="menu:promo")],
         [InlineKeyboardButton(text="📨 Отзыв / предложение", callback_data="menu:feedback")],
     ]
     if is_admin(user_id):
@@ -167,7 +181,7 @@ def after_spin_keyboard(plate_key: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="💵 Продать", callback_data=f"sell:{plate_key}"),
             ],
             [
-                InlineKeyboardButton(text="🎰 Ещё крутить", callback_data="menu:spin"),
+                InlineKeyboardButton(text="🎰 Крутить ещё раз", callback_data="spin:repeat"),
                 InlineKeyboardButton(text="⬅️ Меню", callback_data="menu:home"),
             ],
         ]
@@ -308,6 +322,69 @@ async def cmd_balance(message: Message) -> None:
     if not message.from_user:
         return
     await message.answer(await profile_line(message.from_user.id))
+
+
+@router.message(Command("promo"))
+async def cmd_promo(message: Message) -> None:
+    if not message.from_user:
+        return
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Использование: <code>/promo КОД</code>")
+        return
+    status, reward, balance = await storage.redeem_promo(message.from_user.id, args[1])
+    await _send_promo_result(message, status, reward, balance)
+
+
+@router.callback_query(F.data == "menu:promo")
+async def cb_promo_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.from_user or not callback.message:
+        await callback.answer()
+        return
+    await state.set_state(PromoStates.waiting_code)
+    await callback.answer()
+    await callback.message.edit_text(
+        "🎟 Введите промокод одним сообщением:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="promo:cancel")]]
+        ),
+    )
+
+
+@router.callback_query(F.data == "promo:cancel")
+async def cb_promo_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not callback.from_user or not callback.message:
+        await callback.answer()
+        return
+    await callback.answer("Отменено")
+    await callback.message.edit_text(
+        WELCOME + "\n" + await profile_line(callback.from_user.id),
+        reply_markup=main_menu_keyboard(callback.from_user.id),
+    )
+
+
+async def _send_promo_result(message: Message, status: str, reward: int, balance: int) -> None:
+    texts = {
+        "not_found": "❌ Такой промокод не найден.",
+        "inactive": "❌ Этот промокод отключён.",
+        "used": "ℹ️ Вы уже активировали этот промокод.",
+        "exhausted": "ℹ️ Лимит активаций промокода исчерпан.",
+        "success": f"✅ Промокод активирован! Начислено <b>{reward}</b> ₽. Баланс: <b>{balance}</b> ₽.",
+    }
+    await message.answer(
+        texts.get(status, "Не удалось активировать промокод."),
+        reply_markup=main_menu_keyboard(message.from_user.id if message.from_user else None),
+    )
+
+
+@router.message(PromoStates.waiting_code, F.text)
+async def msg_promo_redeem(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    status, reward, balance = await storage.redeem_promo(message.from_user.id, message.text or "")
+    await state.clear()
+    await _send_promo_result(message, status, reward, balance)
 
 
 @router.callback_query(F.data == "menu:feedback")
@@ -497,7 +574,7 @@ async def cb_vault_safe_list(callback: CallbackQuery) -> None:
             [
                 InlineKeyboardButton(
                     text=f"💵 Продать #{global_idx + 1}",
-                    callback_data=f"vlt:sellask:{global_idx}",
+                    callback_data=f"vlt:sellask:{plate_key_token(item.key)}",
                 )
             ]
         )
@@ -598,7 +675,7 @@ async def _show_collection(
                     ),
                     InlineKeyboardButton(
                         text=f"💵 #{global_idx + 1}",
-                        callback_data=f"vlt:csellask:{global_idx}",
+                        callback_data=f"vlt:csellask:{plate_key_token(item.key)}",
                     ),
                 ]
             )
@@ -694,13 +771,17 @@ async def cb_collection_sell_ask(callback: CallbackQuery) -> None:
     if not callback.from_user or not callback.message or not callback.data:
         await callback.answer()
         return
-    idx = int(callback.data.split(":")[2])
-    user = await storage.get(callback.from_user.id)
-    items = _collection_sorted(user)
-    if idx < 0 or idx >= len(items):
+    key = plate_key_from_token(callback.data.split(":", 2)[2])
+    if key is None:
         await callback.answer("Номер не найден", show_alert=True)
         return
-    item = items[idx]
+    user = await storage.get(callback.from_user.id)
+    items = _collection_sorted(user)
+    item = next((stored for stored in items if stored.key == key), None)
+    if item is None:
+        await callback.answer("Номер не найден", show_alert=True)
+        return
+    token = plate_key_token(key)
     await callback.answer()
     await callback.message.edit_text(
         f"⚠️ <b>Продать из коллекции?</b>\n\n{format_plate_short(item.key, item.price)}\n\n"
@@ -708,7 +789,7 @@ async def cb_collection_sell_ask(callback: CallbackQuery) -> None:
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Да, продать", callback_data=f"vlt:csellok:{idx}"),
+                    InlineKeyboardButton(text="✅ Да, продать", callback_data=f"vlt:csellok:{token}"),
                     InlineKeyboardButton(text="↩️ Отмена", callback_data="vlt:col:0"),
                 ]
             ]
@@ -721,26 +802,22 @@ async def cb_collection_sell_ok(callback: CallbackQuery) -> None:
     if not callback.from_user or not callback.message or not callback.data:
         await callback.answer()
         return
-    idx = int(callback.data.split(":")[2])
-    user = await storage.get(callback.from_user.id)
-    items = _collection_sorted(user)
-    if idx < 0 or idx >= len(items):
+    key = plate_key_from_token(callback.data.split(":", 2)[2])
+    if key is None:
         await callback.answer("Номер не найден", show_alert=True)
         return
-    item = items[idx]
-    if not storage.remove_collection_item(user, item.key):
+    user = await storage.get(callback.from_user.id)
+    item = next((stored for stored in _collection_sorted(user) if stored.key == key), None)
+    if item is None:
         await callback.answer("Уже продано", show_alert=True)
         return
-    new_balance = user.balance + item.price
-    await storage.update(
+    sold, new_balance = await storage.sell_collection_plates(
         callback.from_user.id,
-        collection_items=user.collection_items,
-        collection_pick=user.collection_pick,
-        last_plate_key=user.last_plate_key,
-        balance=new_balance,
-        lifetime_earnings=user.lifetime_earnings + item.price,
+        [(item.key, item.price)],
     )
-    await storage.save()
+    if not sold:
+        await callback.answer("Уже продано", show_alert=True)
+        return
     await callback.answer(f"+{item.price} ₽")
     await callback.message.edit_text(
         f"💵 Продано из коллекции за <b>{item.price}</b> ₽\nБаланс: <b>{new_balance}</b> ₽",
@@ -787,25 +864,17 @@ async def cb_collection_fast_ok(callback: CallbackQuery) -> None:
     if not items:
         await callback.answer("Коллекция пуста", show_alert=True)
         return
-    total = sum(item.price for item in items)
-    keys = {item.key for item in items}
-    user.collection_items = [k for k in user.collection_items if k not in keys]
-    if user.last_plate_key in keys:
-        user.last_plate_key = None
-    user.collection_pick = []
-    new_balance = user.balance + total
-    await storage.update(
+    sold, new_balance = await storage.sell_collection_plates(
         callback.from_user.id,
-        collection_items=user.collection_items,
-        collection_pick=user.collection_pick,
-        last_plate_key=user.last_plate_key,
-        balance=new_balance,
-        lifetime_earnings=user.lifetime_earnings + total,
+        [(item.key, item.price) for item in items],
     )
-    await storage.save()
+    if not sold:
+        await callback.answer("Номера уже проданы", show_alert=True)
+        return
+    total = sum(price for _, price in sold)
     await callback.answer(f"+{total} ₽")
     await callback.message.edit_text(
-        f"⚡ Продано <b>{len(items)}</b> номеров за <b>{total}</b> ₽\n"
+        f"⚡ Продано <b>{len(sold)}</b> номеров за <b>{total}</b> ₽\n"
         f"Баланс: <b>{new_balance}</b> ₽",
         reply_markup=vault_menu_keyboard(),
     )
@@ -848,25 +917,17 @@ async def cb_collection_pick_sell_ok(callback: CallbackQuery) -> None:
     if not items:
         await callback.answer("Ничего не выбрано", show_alert=True)
         return
-    total = sum(item.price for item in items)
-    keys = {item.key for item in items}
-    user.collection_items = [k for k in user.collection_items if k not in keys]
-    user.collection_pick = []
-    if user.last_plate_key in keys:
-        user.last_plate_key = None
-    new_balance = user.balance + total
-    await storage.update(
+    sold, new_balance = await storage.sell_collection_plates(
         callback.from_user.id,
-        collection_items=user.collection_items,
-        collection_pick=user.collection_pick,
-        last_plate_key=user.last_plate_key,
-        balance=new_balance,
-        lifetime_earnings=user.lifetime_earnings + total,
+        [(item.key, item.price) for item in items],
     )
-    await storage.save()
+    if not sold:
+        await callback.answer("Выбранные номера уже проданы", show_alert=True)
+        return
+    total = sum(price for _, price in sold)
     await callback.answer(f"+{total} ₽")
     await callback.message.edit_text(
-        f"💵 Продано выбранных: <b>{len(items)}</b> за <b>{total}</b> ₽\n"
+        f"💵 Продано выбранных: <b>{len(sold)}</b> за <b>{total}</b> ₽\n"
         f"Баланс: <b>{new_balance}</b> ₽",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="📚 К коллекции", callback_data="vlt:col:0")]]
@@ -879,13 +940,17 @@ async def cb_vault_sell_ask(callback: CallbackQuery) -> None:
     if not callback.from_user or not callback.message or not callback.data:
         await callback.answer()
         return
-    idx = int(callback.data.split(":")[2])
-    user = await storage.get(callback.from_user.id)
-    items = sorted_stored(user.safe_items)
-    if idx < 0 or idx >= len(items):
+    key = plate_key_from_token(callback.data.split(":", 2)[2])
+    if key is None:
         await callback.answer("Номер не найден", show_alert=True)
         return
-    item = items[idx]
+    user = await storage.get(callback.from_user.id)
+    items = sorted_stored(user.safe_items)
+    item = next((stored for stored in items if stored.key == key), None)
+    if item is None:
+        await callback.answer("Номер не найден", show_alert=True)
+        return
+    token = plate_key_token(key)
     await callback.answer()
     await callback.message.edit_text(
         f"⚠️ <b>Продать из сейфа?</b>\n\n{format_plate_short(item.key, item.price)}\n\n"
@@ -893,7 +958,7 @@ async def cb_vault_sell_ask(callback: CallbackQuery) -> None:
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Да, продать", callback_data=f"vlt:sellok:{idx}"),
+                    InlineKeyboardButton(text="✅ Да, продать", callback_data=f"vlt:sellok:{token}"),
                     InlineKeyboardButton(text="↩️ Отмена", callback_data="vlt:safe:0"),
                 ]
             ]
@@ -906,28 +971,22 @@ async def cb_vault_sell_ok(callback: CallbackQuery) -> None:
     if not callback.from_user or not callback.message or not callback.data:
         await callback.answer()
         return
-    idx = int(callback.data.split(":")[2])
-    user = await storage.get(callback.from_user.id)
-    items = sorted_stored(user.safe_items)
-    if idx < 0 or idx >= len(items):
+    key = plate_key_from_token(callback.data.split(":", 2)[2])
+    if key is None:
         await callback.answer("Номер не найден", show_alert=True)
         return
-    item = items[idx]
-    key = item.key
-    if key not in user.safe_items:
+    user = await storage.get(callback.from_user.id)
+    items = sorted_stored(user.safe_items)
+    item = next((stored for stored in items if stored.key == key), None)
+    if item is None:
         await callback.answer("Уже продан", show_alert=True)
         return
 
     price = item.price
-    user.safe_items.remove(key)
-    new_balance = user.balance + price
-    await storage.update(
-        callback.from_user.id,
-        safe_items=user.safe_items,
-        balance=new_balance,
-        lifetime_earnings=user.lifetime_earnings + price,
-    )
-    await storage.save()
+    new_balance = await storage.sell_safe_plate(callback.from_user.id, key, price)
+    if new_balance is None:
+        await callback.answer("Уже продан", show_alert=True)
+        return
     await callback.answer(f"+{price} ₽")
     await callback.message.edit_text(
         f"💵 Продано из сейфа за <b>{price}</b> ₽\nБаланс: <b>{new_balance}</b> ₽",
@@ -1238,6 +1297,11 @@ async def cb_spin_now(callback: CallbackQuery) -> None:
     await _do_spin(callback)
 
 
+@router.callback_query(F.data == "spin:repeat")
+async def cb_spin_repeat(callback: CallbackQuery) -> None:
+    await _do_spin(callback)
+
+
 @router.callback_query(F.data.startswith("spin:reg:"))
 async def cb_spin_regional(callback: CallbackQuery) -> None:
     if not callback.data:
@@ -1322,14 +1386,10 @@ async def cb_sell(callback: CallbackQuery) -> None:
 
     evaluation = evaluate_plate(plate)
     price = evaluation.sell_price
-    new_balance = user.balance + price
-    await storage.update(
-        callback.from_user.id,
-        balance=new_balance,
-        last_plate_key=None,
-        lifetime_earnings=user.lifetime_earnings + price,
-    )
-    await storage.save()
+    new_balance = await storage.sell_last_plate(callback.from_user.id, key, price)
+    if new_balance is None:
+        await callback.answer("Этот номер уже продан или устарел", show_alert=True)
+        return
     await callback.answer(f"+{price} ₽")
     await callback.message.edit_text(
         f"💵 Продано: {rarity_badge(evaluation.rarity)} · <code>{plate.formatted()}</code>\n"

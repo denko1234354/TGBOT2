@@ -43,10 +43,13 @@ class UserStorage:
     def __init__(self, base_dir: str) -> None:
         self._path = os.path.join(base_dir, DATA_DIR, USERS_FILE)
         self._feedback_path = os.path.join(base_dir, DATA_DIR, "feedback.json")
+        self._promos_path = os.path.join(base_dir, DATA_DIR, "promocodes.json")
         self._lock = asyncio.Lock()
         self._feedback_lock = asyncio.Lock()
+        self._promos_lock = asyncio.Lock()
         self._users: dict[str, UserState] = {}
         self._feedback: list[dict[str, object]] = []
+        self._promos: dict[str, dict[str, object]] = {}
 
     async def load(self) -> None:
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
@@ -75,6 +78,68 @@ class UserStorage:
                 raw_feedback = json.load(f)
             if isinstance(raw_feedback, list):
                 self._feedback = [item for item in raw_feedback if isinstance(item, dict)]
+        if os.path.isfile(self._promos_path):
+            with open(self._promos_path, encoding="utf-8") as f:
+                raw_promos = json.load(f)
+            if isinstance(raw_promos, dict):
+                self._promos = {
+                    str(code).upper(): item
+                    for code, item in raw_promos.items()
+                    if isinstance(item, dict)
+                }
+
+    async def _save_promos(self) -> None:
+        os.makedirs(os.path.dirname(self._promos_path), exist_ok=True)
+        with open(self._promos_path, "w", encoding="utf-8") as f:
+            json.dump(self._promos, f, ensure_ascii=False, indent=2)
+
+    async def add_promo(self, code: str, reward: int, max_uses: int) -> bool:
+        normalized = code.strip().upper()
+        async with self._promos_lock:
+            if normalized in self._promos:
+                return False
+            self._promos[normalized] = {
+                "reward": reward,
+                "max_uses": max_uses,
+                "redeemed_by": [],
+                "active": True,
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="minutes"),
+            }
+            await self._save_promos()
+            return True
+
+    async def list_promos(self) -> list[tuple[str, dict[str, object]]]:
+        async with self._promos_lock:
+            return [(code, dict(data)) for code, data in sorted(self._promos.items())]
+
+    async def redeem_promo(self, user_id: int, code: str) -> tuple[str, int, int]:
+        """Return (status, reward, balance); a code can be claimed once per player."""
+        user = await self.get(user_id)
+        normalized = code.strip().upper()
+        async with self._promos_lock:
+            promo = self._promos.get(normalized)
+            if promo is None:
+                return "not_found", 0, user.balance
+            if not promo.get("active", True):
+                return "inactive", 0, user.balance
+            redeemed = [str(uid) for uid in promo.get("redeemed_by", [])]
+            if str(user_id) in redeemed:
+                return "used", 0, user.balance
+            max_uses = int(promo.get("max_uses", 0))
+            if max_uses > 0 and len(redeemed) >= max_uses:
+                return "exhausted", 0, user.balance
+            reward = max(0, int(promo.get("reward", 0)))
+            if reward <= 0:
+                return "inactive", 0, user.balance
+            redeemed.append(str(user_id))
+            promo["redeemed_by"] = redeemed
+            async with self._lock:
+                current = self._users.setdefault(str(user_id), user)
+                current.balance += reward
+                balance = current.balance
+            await self._save_promos()
+            await self.save()
+            return "success", reward, balance
 
     async def add_feedback(self, user_id: int, display_name: str, text: str) -> None:
         async with self._feedback_lock:
@@ -154,6 +219,64 @@ class UserStorage:
             for name, value in kwargs.items():
                 setattr(user, name, value)
             return user
+
+    async def sell_last_plate(self, user_id: int, plate_key: str, price: int) -> int | None:
+        """Sell the current spin result once; None means it was already consumed."""
+        async with self._lock:
+            user = self._users.get(str(user_id))
+            if user is None or user.last_plate_key != plate_key or plate_key in user.safe_items:
+                return None
+            user.last_plate_key = None
+            user.collection_items = [key for key in user.collection_items if key != plate_key]
+            user.collection_pick = [key for key in user.collection_pick if key != plate_key]
+            user.balance += price
+            user.lifetime_earnings += price
+            balance = user.balance
+        await self.save()
+        return balance
+
+    async def sell_collection_plates(
+        self,
+        user_id: int,
+        requested: list[tuple[str, int]],
+    ) -> tuple[list[tuple[str, int]], int]:
+        """Atomically sell only requested plates still present in the collection."""
+        sold: list[tuple[str, int]] = []
+        async with self._lock:
+            user = self._users.get(str(user_id))
+            if user is None:
+                return sold, 0
+            available = set(user.collection_items) - set(user.safe_items)
+            seen: set[str] = set()
+            for plate_key, price in requested:
+                if plate_key in available and plate_key not in seen:
+                    sold.append((plate_key, price))
+                    seen.add(plate_key)
+            if not sold:
+                return sold, user.balance
+            user.collection_items = [key for key in user.collection_items if key not in seen]
+            user.collection_pick = [key for key in user.collection_pick if key not in seen]
+            if user.last_plate_key in seen:
+                user.last_plate_key = None
+            earned = sum(price for _, price in sold)
+            user.balance += earned
+            user.lifetime_earnings += earned
+            balance = user.balance
+        await self.save()
+        return sold, balance
+
+    async def sell_safe_plate(self, user_id: int, plate_key: str, price: int) -> int | None:
+        """Sell a plate only if it is still stored in the safe."""
+        async with self._lock:
+            user = self._users.get(str(user_id))
+            if user is None or plate_key not in user.safe_items:
+                return None
+            user.safe_items = [key for key in user.safe_items if key != plate_key]
+            user.balance += price
+            user.lifetime_earnings += price
+            balance = user.balance
+        await self.save()
+        return balance
 
     async def leaderboard(self, limit: int = 10) -> list[tuple[str, UserState]]:
         async with self._lock:

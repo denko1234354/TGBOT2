@@ -48,6 +48,7 @@ class AdminStates(StatesGroup):
     waiting_setting = State()
     waiting_price_list = State()
     waiting_search = State()
+    waiting_promo = State()
 
 
 def init_admin_panel(storage: UserStorage) -> set[int]:
@@ -88,6 +89,7 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard"),
             ],
             [InlineKeyboardButton(text="🔍 Оценить", callback_data="menu:rate_hint")],
+            [InlineKeyboardButton(text="🎟 Промокод", callback_data="menu:promo")],
             [InlineKeyboardButton(text="📨 Отзыв / предложение", callback_data="menu:feedback")],
             [InlineKeyboardButton(text="🛠 Админка", callback_data="menu:admin")],
         ]
@@ -99,6 +101,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Игроки", callback_data="admin:pls:0")],
             [InlineKeyboardButton(text="📨 Отзывы и предложения", callback_data="admin:feedback:0")],
+            [InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin:promos")],
             [InlineKeyboardButton(text="⚙️ Цены и шансы", callback_data="admin:cfg")],
             [InlineKeyboardButton(text="🏆 Лидеры", callback_data="menu:leaderboard")],
             [InlineKeyboardButton(text="💣 Вайп всех", callback_data="admin:wipe")],
@@ -321,6 +324,86 @@ async def cmd_admin(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(admin_home_text(), reply_markup=_admin_kb())
+
+
+async def _show_promos(target: Message | CallbackQuery) -> None:
+    assert _storage is not None
+    promos = await _storage.list_promos()
+    lines = ["🎟 <b>Промокоды</b>", "Формат создания: КОД СУММА ЛИМИТ (0 — без лимита).", ""]
+    if not promos:
+        lines.append("Промокодов пока нет.")
+    for code, promo in promos:
+        redeemed = promo.get("redeemed_by", [])
+        redeemed_count = len(redeemed) if isinstance(redeemed, list) else 0
+        maximum = int(promo.get("max_uses", 0))
+        limit = str(maximum) if maximum else "∞"
+        status = "включён" if promo.get("active", True) else "выключен"
+        lines.append(
+            f"<code>{escape(code)}</code> · {int(promo.get('reward', 0))} ₽ · "
+            f"{redeemed_count}/{limit} · {status}"
+        )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin:promo:add")],
+        [InlineKeyboardButton(text="⬅️ Админка", callback_data="menu:admin")],
+    ])
+    if isinstance(target, CallbackQuery):
+        if target.message:
+            await target.message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await target.answer("\n".join(lines), reply_markup=markup)
+
+
+@admin_router.callback_query(F.data == "admin:promos")
+async def cb_admin_promos(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _require_admin(callback) is None:
+        return
+    await state.clear()
+    await callback.answer()
+    await _show_promos(callback)
+
+
+@admin_router.callback_query(F.data == "admin:promo:add")
+async def cb_admin_promo_add(callback: CallbackQuery, state: FSMContext) -> None:
+    if await _require_admin(callback) is None:
+        return
+    await state.set_state(AdminStates.waiting_promo)
+    await callback.answer()
+    await callback.message.edit_text(
+        "Отправьте одной строкой: <code>КОД НАГРАДА ЛИМИТ</code>\n"
+        "Например: <code>START500 500 100</code>\n"
+        "Лимит 0 означает неограниченное число активаций.",
+        reply_markup=_cancel_kb("admin:promos"),
+    )
+
+
+@admin_router.message(AdminStates.waiting_promo, F.text)
+async def admin_create_promo(message: Message, state: FSMContext) -> None:
+    if await _require_admin(message) is None:
+        return
+    parts = (message.text or "").strip().split()
+    if len(parts) != 3:
+        await message.answer("Нужны три значения: КОД НАГРАДА ЛИМИТ. Пример: <code>START500 500 100</code>")
+        return
+    code = parts[0].upper()
+    if not (3 <= len(code) <= 32) or not all(ch.isalnum() or ch in "_-" for ch in code):
+        await message.answer("Код должен быть длиной 3–32 символа и содержать только буквы, цифры, _ или -.")
+        return
+    try:
+        reward, max_uses = int(parts[1]), int(parts[2])
+    except ValueError:
+        await message.answer("Награда и лимит должны быть целыми числами.")
+        return
+    if reward <= 0 or max_uses < 0:
+        await message.answer("Награда должна быть больше нуля, лимит — ноль или больше.")
+        return
+    assert _storage is not None
+    created = await _storage.add_promo(code, reward, max_uses)
+    if not created:
+        await message.answer("Такой код уже существует. Используйте другое название.")
+        return
+    await state.clear()
+    await message.answer(f"✅ Промокод <code>{escape(code)}</code> создан.")
+    await _show_promos(message)
 
 
 @admin_router.callback_query(F.data == "menu:admin")
