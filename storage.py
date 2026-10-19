@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from vault import collection_capacity, safe_capacity
+from data_paths import data_directory
 
 START_BALANCE = 2500
 DATA_DIR = "data"
@@ -41,9 +42,10 @@ class UserState:
 
 class UserStorage:
     def __init__(self, base_dir: str) -> None:
-        self._path = os.path.join(base_dir, DATA_DIR, USERS_FILE)
-        self._feedback_path = os.path.join(base_dir, DATA_DIR, "feedback.json")
-        self._promos_path = os.path.join(base_dir, DATA_DIR, "promocodes.json")
+        self._data_dir = data_directory(base_dir)
+        self._path = os.path.join(self._data_dir, USERS_FILE)
+        self._feedback_path = os.path.join(self._data_dir, "feedback.json")
+        self._promos_path = os.path.join(self._data_dir, "promocodes.json")
         self._lock = asyncio.Lock()
         self._feedback_lock = asyncio.Lock()
         self._promos_lock = asyncio.Lock()
@@ -52,7 +54,7 @@ class UserStorage:
         self._promos: dict[str, dict[str, object]] = {}
 
     async def load(self) -> None:
-        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        os.makedirs(self._data_dir, exist_ok=True)
         raw = {}
         if os.path.isfile(self._path):
             with open(self._path, encoding="utf-8") as f:
@@ -149,7 +151,7 @@ class UserStorage:
                 "text": text,
                 "created_at": datetime.now(timezone.utc).isoformat(timespec="minutes"),
             })
-            os.makedirs(os.path.dirname(self._feedback_path), exist_ok=True)
+            os.makedirs(self._data_dir, exist_ok=True)
             with open(self._feedback_path, "w", encoding="utf-8") as f:
                 json.dump(self._feedback, f, ensure_ascii=False, indent=2)
 
@@ -177,7 +179,7 @@ class UserStorage:
                 }
                 for uid, u in self._users.items()
             }
-            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            os.makedirs(self._data_dir, exist_ok=True)
             with open(self._path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
 

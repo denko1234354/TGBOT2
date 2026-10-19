@@ -8,6 +8,7 @@ import os
 from dataclasses import asdict, dataclass, field
 
 from regions import GLOBAL_ROULETTE_COST, SPIN_COST_BY_TIER
+from data_paths import data_directory
 
 _DEFAULT_START_BALANCE = 2500
 _DEFAULT_SAFE_UPGRADE = (5000, 18000, 45000, 100000)
@@ -35,7 +36,7 @@ def default_settings() -> GameSettings:
 
 class GameConfigStore:
     def __init__(self, base_dir: str) -> None:
-        self._path = os.path.join(base_dir, "data", "game_config.json")
+        self._path = os.path.join(data_directory(base_dir), "game_config.json")
         self._lock = asyncio.Lock()
         self._settings = default_settings()
 
