@@ -114,6 +114,25 @@ class UserStorage:
         async with self._promos_lock:
             return [(code, dict(data)) for code, data in sorted(self._promos.items())]
 
+    async def set_promo_active(self, code: str, active: bool) -> bool:
+        normalized = code.strip().upper()
+        async with self._promos_lock:
+            promo = self._promos.get(normalized)
+            if promo is None:
+                return False
+            promo["active"] = active
+            await self._save_promos()
+            return True
+
+    async def delete_promo(self, code: str) -> bool:
+        normalized = code.strip().upper()
+        async with self._promos_lock:
+            if normalized not in self._promos:
+                return False
+            del self._promos[normalized]
+            await self._save_promos()
+            return True
+
     async def redeem_promo(self, user_id: int, code: str) -> tuple[str, int, int]:
         """Return (status, reward, balance); a code can be claimed once per player."""
         user = await self.get(user_id)

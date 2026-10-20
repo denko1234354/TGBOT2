@@ -101,14 +101,16 @@ def _from_dict(raw: dict) -> GameSettings:
     for key in data:
         if key in raw:
             data[key] = raw[key]
-    # Перенос старого значения по умолчанию на базовую пошлину из оригинала.
-    if raw.get("global_roulette_cost") == 220:
+    # Старый формат содержал spin_tier_* и базу прокрута, отличную от пошлины
+    # в оригинале. На миграции используем значение из оригинальной игры.
+    has_legacy_spin_tiers = any(key.startswith("spin_tier_") for key in raw)
+    if has_legacy_spin_tiers or raw.get("global_roulette_cost") == 220:
         data["global_roulette_cost"] = GLOBAL_ROULETTE_COST
     return GameSettings(**data)
 
 
 CONFIG_FIELDS: dict[str, str] = {
-    "global_roulette_cost": "🎰 Общая рулетка (₽)",
+    "global_roulette_cost": "🎰 Базовая пошлина (₽)",
     "start_balance": "💳 Стартовый баланс новых игроков",
     "sell_price_multiplier": "💵 Множитель цены продажи номеров",
     "special_spawn_multiplier": "✨ Множ. шанса спецномеров",

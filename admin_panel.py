@@ -436,25 +436,88 @@ async def _show_promos(target: Message | CallbackQuery) -> None:
     lines = ["🎟 <b>Промокоды</b>", "Формат создания: КОД СУММА ЛИМИТ (0 — без лимита).", ""]
     if not promos:
         lines.append("Промокодов пока нет.")
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin:promo:add")]
+    ]
     for code, promo in promos:
         redeemed = promo.get("redeemed_by", [])
         redeemed_count = len(redeemed) if isinstance(redeemed, list) else 0
         maximum = int(promo.get("max_uses", 0))
         limit = str(maximum) if maximum else "∞"
-        status = "включён" if promo.get("active", True) else "выключен"
+        active = bool(promo.get("active", True))
+        status = "включён" if active else "выключен"
         lines.append(
             f"<code>{escape(code)}</code> · {int(promo.get('reward', 0))} ₽ · "
             f"{redeemed_count}/{limit} · {status}"
         )
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin:promo:add")],
-        [InlineKeyboardButton(text="⬅️ Админка", callback_data="menu:admin")],
-    ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="⏸ Выключить" if active else "▶️ Включить",
+                    callback_data=f"admin:promo:toggle:{code}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Удалить",
+                    callback_data=f"admin:promo:delete:{code}",
+                ),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="⬅️ Админка", callback_data="menu:admin")])
+    markup = InlineKeyboardMarkup(inline_keyboard=rows)
     if isinstance(target, CallbackQuery):
         if target.message:
             await target.message.edit_text("\n".join(lines), reply_markup=markup)
     else:
         await target.answer("\n".join(lines), reply_markup=markup)
+
+
+@admin_router.callback_query(F.data.startswith("admin:promo:toggle:"))
+async def cb_admin_promo_toggle(callback: CallbackQuery) -> None:
+    if await _require_admin(callback) is None or not callback.data:
+        return
+    assert _storage is not None
+    code = callback.data.removeprefix("admin:promo:toggle:")
+    promos = dict(await _storage.list_promos())
+    promo = promos.get(code)
+    if promo is None:
+        await callback.answer("Промокод не найден", show_alert=True)
+        return
+    active = not bool(promo.get("active", True))
+    if not await _storage.set_promo_active(code, active):
+        await callback.answer("Промокод не найден", show_alert=True)
+        return
+    await callback.answer("Промокод включён" if active else "Промокод выключен")
+    await _show_promos(callback)
+
+
+@admin_router.callback_query(F.data.startswith("admin:promo:delete:"))
+async def cb_admin_promo_delete_prompt(callback: CallbackQuery) -> None:
+    if await _require_admin(callback) is None or not callback.data:
+        return
+    code = callback.data.removeprefix("admin:promo:delete:")
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            f"Удалить промокод <code>{escape(code)}</code>?\n"
+            "Его больше нельзя будет активировать.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"admin:promo:delconfirm:{code}")],
+                    [InlineKeyboardButton(text="↩️ Отмена", callback_data="admin:promos")],
+                ]
+            ),
+        )
+
+
+@admin_router.callback_query(F.data.startswith("admin:promo:delconfirm:"))
+async def cb_admin_promo_delete_confirm(callback: CallbackQuery) -> None:
+    if await _require_admin(callback) is None or not callback.data:
+        return
+    assert _storage is not None
+    code = callback.data.removeprefix("admin:promo:delconfirm:")
+    deleted = await _storage.delete_promo(code)
+    await callback.answer("Промокод удалён" if deleted else "Промокод уже отсутствует")
+    await _show_promos(callback)
 
 
 @admin_router.callback_query(F.data == "admin:promos")
