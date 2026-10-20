@@ -830,6 +830,7 @@ async def admin_got_setting(message: Message, state: FSMContext) -> None:
         await message.answer("Не получилось прочитать число.")
         return
     await config_store().set_field(key, value)
+    value = getattr(config_store().get(), key)
     await state.clear()
     await message.answer(
         f"✅ {CONFIG_FIELDS.get(key, key)} = <b>{value}</b>\n\n" + format_config_text(),

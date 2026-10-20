@@ -44,6 +44,8 @@ class GameConfigStore:
         with open(self._path, encoding="utf-8") as f:
             raw = json.load(f)
         self._settings = _from_dict(raw)
+        if raw.get("global_roulette_cost") != self._settings.global_roulette_cost:
+            await self.save()
 
     async def save(self) -> None:
         async with self._lock:
@@ -66,6 +68,8 @@ class GameConfigStore:
         async with self._lock:
             if not hasattr(self._settings, key):
                 raise KeyError(key)
+            if key == "global_roulette_cost":
+                value = max(GLOBAL_ROULETTE_COST, int(value))
             setattr(self._settings, key, value)
         await self.save()
 
@@ -92,7 +96,7 @@ def config_store() -> GameConfigStore:
 def global_spin_cost() -> int:
     if _store is None:
         return GLOBAL_ROULETTE_COST
-    return _store.get().global_roulette_cost
+    return max(GLOBAL_ROULETTE_COST, _store.get().global_roulette_cost)
 
 
 def _from_dict(raw: dict) -> GameSettings:
@@ -103,8 +107,7 @@ def _from_dict(raw: dict) -> GameSettings:
             data[key] = raw[key]
     # Старый формат содержал spin_tier_* и базу прокрута, отличную от пошлины
     # в оригинале. На миграции используем значение из оригинальной игры.
-    has_legacy_spin_tiers = any(key.startswith("spin_tier_") for key in raw)
-    if has_legacy_spin_tiers or raw.get("global_roulette_cost") == 220:
+    if int(data["global_roulette_cost"]) < GLOBAL_ROULETTE_COST:
         data["global_roulette_cost"] = GLOBAL_ROULETTE_COST
     return GameSettings(**data)
 
