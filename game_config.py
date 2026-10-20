@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 
-from regions import GLOBAL_ROULETTE_COST, SPIN_COST_BY_TIER
+from regions import GLOBAL_ROULETTE_COST
 from data_paths import data_directory
 
 _DEFAULT_START_BALANCE = 2500
@@ -18,10 +18,6 @@ _DEFAULT_COLLECTION_UPGRADE = (7500, 22000, 55000, 130000)
 @dataclass
 class GameSettings:
     global_roulette_cost: int = GLOBAL_ROULETTE_COST
-    spin_tier_1: int = SPIN_COST_BY_TIER[1]
-    spin_tier_2: int = SPIN_COST_BY_TIER[2]
-    spin_tier_3: int = SPIN_COST_BY_TIER[3]
-    spin_tier_4: int = SPIN_COST_BY_TIER[4]
     start_balance: int = _DEFAULT_START_BALANCE
     sell_price_multiplier: float = 1.0
     special_spawn_multiplier: float = 1.0
@@ -73,16 +69,6 @@ class GameConfigStore:
             setattr(self._settings, key, value)
         await self.save()
 
-    def spin_cost_for_tier(self, tier: int) -> int:
-        mapping = {
-            1: self._settings.spin_tier_1,
-            2: self._settings.spin_tier_2,
-            3: self._settings.spin_tier_3,
-            4: self._settings.spin_tier_4,
-        }
-        return mapping.get(tier, self._settings.spin_tier_3)
-
-
 _store: GameConfigStore | None = None
 
 
@@ -103,12 +89,6 @@ def config_store() -> GameConfigStore:
     return _store
 
 
-def spin_cost_for_tier(tier: int) -> int:
-    if _store is None:
-        return SPIN_COST_BY_TIER.get(tier, SPIN_COST_BY_TIER[3])
-    return _store.spin_cost_for_tier(tier)
-
-
 def global_spin_cost() -> int:
     if _store is None:
         return GLOBAL_ROULETTE_COST
@@ -121,15 +101,14 @@ def _from_dict(raw: dict) -> GameSettings:
     for key in data:
         if key in raw:
             data[key] = raw[key]
+    # Перенос старого значения по умолчанию на базовую пошлину из оригинала.
+    if raw.get("global_roulette_cost") == 220:
+        data["global_roulette_cost"] = GLOBAL_ROULETTE_COST
     return GameSettings(**data)
 
 
 CONFIG_FIELDS: dict[str, str] = {
     "global_roulette_cost": "🎰 Общая рулетка (₽)",
-    "spin_tier_1": "🗺 Прокрут tier 1 (₽)",
-    "spin_tier_2": "🗺 Прокрут tier 2 (₽)",
-    "spin_tier_3": "🗺 Прокрут tier 3 (₽)",
-    "spin_tier_4": "🗺 Прокрут tier 4 (₽)",
     "start_balance": "💳 Стартовый баланс новых игроков",
     "sell_price_multiplier": "💵 Множитель цены продажи номеров",
     "special_spawn_multiplier": "✨ Множ. шанса спецномеров",

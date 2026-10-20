@@ -33,10 +33,6 @@ _BROADCAST_LOCK = asyncio.Lock()
 
 INT_FIELDS = {
     "global_roulette_cost",
-    "spin_tier_1",
-    "spin_tier_2",
-    "spin_tier_3",
-    "spin_tier_4",
     "start_balance",
 }
 FLOAT_FIELDS = {

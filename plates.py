@@ -6,18 +6,22 @@ import random
 import re
 from dataclasses import dataclass
 
-from regions import REGIONS, Region, get_region, region_value_bonus
+from regions import REGIONS, Region, get_region, region_multiplier, registration_codes_for
 
 # Допустимые буквы на гражданских госномерах РФ.
 PLATE_LETTERS = "АВЕКМНОРСТУХ"
 
 KIND_CIVILIAN = "civilian"
 
-# Множитель стоимости региона при продаже номера.
-REGION_SELL_MULT: dict[int, float] = {1: 1.45, 2: 1.2, 3: 1.0, 4: 0.85}
-# Original-game screenshots show a wide price gap between epic and legendary
-# plates. This premium also keeps legends above epics across region tiers.
-LEGENDARY_PRICE_MULTIPLIER = 20
+# Multipliers and category bonuses follow the original game's price cards.
+REGION_CODE_MULT: dict[str, float] = {"two_digit": 1.0, "three_digit": 0.69, "repeated": 0.57}
+RARITY_CLASS_MULT: dict[str, float] = {
+    "common": 1.0,
+    "uncommon": 1.05,
+    "rare": 1.2,
+    "epic": 16.0,
+    "legendary": 50.0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +42,8 @@ PLATE_KINDS: dict[str, PlateKindInfo] = {
     "mvd": PlateKindInfo("mvd", "МВД / полиция", "🚔", 7.0, 14, "mvd"),
     "mchs": PlateKindInfo("mchs", "МЧС", "🚒", 5.5, 12, "mch"),
     "prosecutor": PlateKindInfo("prosecutor", "Прокуратура / следствие", "⚖️", 6.5, 8, "pro"),
-    "transit": PlateKindInfo("transit", "Транзитный", "🚛", 1.35, 22, "trn"),
-    "taxi": PlateKindInfo("taxi", "Такси / коммерция", "🚕", 0.72, 35, "tax"),
+    "transit": PlateKindInfo("transit", "Транзитный", "🚛", 1.0, 22, "trn"),
+    "taxi": PlateKindInfo("taxi", "Такси", "🚕", 1.0, 35, "tax"),
 }
 
 _KIND_WEIGHTS: list[tuple[str, int]] = [(k.id, k.spawn_weight) for k in PLATE_KINDS.values()]
@@ -79,10 +83,11 @@ class RarityInfo:
     emoji: str
 
 
-RARITY_COMMON = RarityInfo("common", "Обычные", "⚪")
-RARITY_UNCOMMON = RarityInfo("uncommon", "Необычные", "🟢")
-RARITY_EPIC = RarityInfo("epic", "Эпические", "🟣")
-RARITY_LEGENDARY = RarityInfo("legendary", "Легендарные", "🟡")
+RARITY_COMMON = RarityInfo("common", "Обычный", "⚪")
+RARITY_UNCOMMON = RarityInfo("uncommon", "Необычный", "🟢")
+RARITY_RARE = RarityInfo("rare", "Редкий", "🔵")
+RARITY_EPIC = RarityInfo("epic", "Эпический", "🟣")
+RARITY_LEGENDARY = RarityInfo("legendary", "Легендарный", "🟡")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +149,10 @@ class Plate:
 
     @property
     def series(self) -> str:
+        if self.kind == "taxi":
+            return f"{self.letter2}{self.letter3}{self.digits}"
+        if self.kind == "transit":
+            return f"Т{self.letter2}{self.letter3}{self.digits}"
         return f"{self.letter1}{self.digits}{self.letter2}{self.letter3}"
 
     def kind_info(self) -> PlateKindInfo:
@@ -155,6 +164,10 @@ class Plate:
             body = f"D {self.digits} {self.letter2}{self.letter3}"
         elif self.kind == "military":
             body = f"{self.digits} {self.letter2}{self.letter3}"
+        elif self.kind == "taxi":
+            body = f"{self.letter2}{self.letter3} {self.digits}"
+        elif self.kind == "transit":
+            body = f"Т {self.letter2}{self.letter3} {self.digits}"
         else:
             body = f"{self.letter1} {self.digits} {self.letter2}{self.letter3}"
         return f"{info.emoji} {body} {self.region_code}"
@@ -166,6 +179,12 @@ class PlateEvaluation:
     region: Region | None
     specialties: tuple[Specialty, ...]
     base_value: int
+    combination_bonus: int
+    combo_multiplier: float
+    region_multiplier: float
+    code_multiplier: float
+    kind_multiplier: float
+    class_multiplier: float
     total_multiplier: float
     sell_price: int
     rarity: RarityInfo
@@ -180,28 +199,15 @@ def determine_rarity(
     specialties: tuple[Specialty, ...],
     total_multiplier: float,
 ) -> RarityInfo:
-    combo = [s for s in specialties if not s.id.startswith("kind_")]
-    spec_ids = {s.id for s in specialties}
-
-    if total_multiplier >= 45:
+    bonus = sum(int(s.multiplier) for s in specialties)
+    if bonus >= 90_000:
         return RARITY_LEGENDARY
-    if "jackpot777" in spec_ids and total_multiplier >= 12:
-        return RARITY_LEGENDARY
-    if plate.kind == "diplomatic" and total_multiplier >= 25:
-        return RARITY_LEGENDARY
-    if plate.kind in ("fso", "military") and total_multiplier >= 30:
-        return RARITY_LEGENDARY
-
-    if total_multiplier >= 9 or len(combo) >= 3:
+    if bonus >= 40_000:
         return RARITY_EPIC
-    if plate.kind in ("diplomatic", "fso", "military", "mvd", "prosecutor") and total_multiplier >= 6:
-        return RARITY_EPIC
-
-    if total_multiplier >= 2.4 or combo or plate.kind not in (KIND_CIVILIAN, "taxi"):
-        if plate.kind == "taxi" and total_multiplier < 2 and not combo:
-            return RARITY_COMMON
+    if bonus >= 20_000:
+        return RARITY_RARE
+    if bonus >= 5_000:
         return RARITY_UNCOMMON
-
     return RARITY_COMMON
 
 
@@ -247,7 +253,10 @@ def _gov_digits(rng: random.Random, kind: str) -> str:
 def generate_plate(region_code: str | None, rng: random.Random | None = None) -> Plate:
     rng = rng or random.Random()
     if region_code is None:
-        region_code = rng.choice(REGIONS).code
+        region = rng.choice(REGIONS)
+        region_code = rng.choice(region.registration_codes)
+    else:
+        region_code = rng.choice(registration_codes_for(region_code))
 
     kind = _roll_kind(rng)
     digits = _gov_digits(rng, kind)
@@ -259,6 +268,14 @@ def generate_plate(region_code: str | None, rng: random.Random | None = None) ->
     if kind == "military":
         l2, l3 = _random_letters(2, rng)
         return Plate("", digits, l2, l3, region_code, kind=kind)
+
+    if kind == "taxi":
+        l2, l3 = _random_letters(2, rng)
+        return Plate("", digits, l2, l3, region_code, kind=kind)
+
+    if kind == "transit":
+        l2, l3 = _random_letters(2, rng)
+        return Plate("Т", digits, l2, l3, region_code, kind=kind)
 
     l1 = rng.choice(PLATE_LETTERS)
     l2, l3 = _random_letters(2, rng)
@@ -378,7 +395,7 @@ def _detect_digit_specialties(digits: str) -> list[Specialty]:
                 )
             )
 
-    if digits in ("123", "234", "345", "456", "567", "678", "789"):
+    if digits in ("012", "123", "234", "345", "456", "567", "678", "789"):
         found.append(
             _spec(
                 "sequence_asc",
@@ -388,7 +405,7 @@ def _detect_digit_specialties(digits: str) -> list[Specialty]:
                 f"цифры идут подряд вверх: {digits}",
             )
         )
-    if digits in ("987", "876", "765", "654", "543", "432", "321"):
+    if digits in ("987", "876", "765", "654", "543", "432", "321", "210"):
         found.append(
             _spec(
                 "sequence_desc",
@@ -439,24 +456,29 @@ def _detect_letter_specialties(plate: Plate) -> list[Specialty]:
             )
         return found
 
-    if plate.letter2 == plate.letter3:
+    letter_group = (
+        (plate.letter2, plate.letter3)
+        if plate.kind in ("taxi", "transit", "military")
+        else (plate.letter1, plate.letter2, plate.letter3)
+    )
+    if len(set(letter_group)) == 1 and len(letter_group) == 3:
+        found.append(
+            _spec(
+                "triple_letter",
+                "Три одинаковые буквы",
+                3.5,
+                "🏆",
+                f"все три буквы одинаковые: {''.join(letter_group)}",
+            )
+        )
+    elif len(set(letter_group)) < len(letter_group):
         found.append(
             _spec(
                 "twin_letters",
                 "Две одинаковые буквы",
                 1.7,
                 "🔤",
-                f"в конце две одинаковые буквы: {tail}",
-            )
-        )
-    if plate.letter1 and plate.letter1 == plate.letter2 == plate.letter3:
-        found.append(
-            _spec(
-                "triple_letter",
-                "Тройная буква",
-                3.5,
-                "🏆",
-                f"все три буквы одинаковые: {plate.letter1}{tail}",
+                "в серии есть две одинаковые буквы",
             )
         )
 
@@ -544,38 +566,136 @@ def _dedupe_specialties(items: list[Specialty]) -> tuple[Specialty, ...]:
 def evaluate_plate(plate: Plate) -> PlateEvaluation:
     region = get_region(plate.region_code)
     tier = region.tier if region else 3
-    base = 80 + region_value_bonus(tier)
+    base = 100
 
-    specs_list: list[Specialty] = []
-    kind_spec = _kind_specialty(plate.kind)
-    if kind_spec:
-        specs_list.append(kind_spec)
-    specs_list.extend(_detect_digit_specialties(plate.digits))
-    specs_list.extend(_detect_letter_specialties(plate))
-    specs_list.extend(_detect_blat_specialties(plate))
-    specs_list.extend(_detect_gov_specialties(plate))
-    specs = _dedupe_specialties(specs_list)
+    detected: list[Specialty] = []
+    detected.extend(_detect_digit_specialties(plate.digits))
+    detected.extend(_detect_letter_specialties(plate))
+    detected.extend(_detect_blat_specialties(plate))
+    detected.extend(_detect_gov_specialties(plate))
+    detected = list(_dedupe_specialties(detected))
 
-    mult = 1.0
-    for s in specs:
-        mult *= s.multiplier
-    mult = min(mult, 200.0)
+    bonus_by_id = {
+        "twin_letters": 8_000,
+        "triple_letter": 24_000,
+        "triple": 21_000,
+        "quad": 30_000,
+        "sequence_asc": 5_000,
+        "sequence_desc": 5_000,
+        "mirror3": 10_000,
+        "full_palindrome": 12_000,
+        "pair_digits": 2_000,
+        "round_hundred": 2_000,
+        "round_exact": 3_000,
+        "agent007": 5_000,
+        "first001": 3_000,
+        "lucky888": 5_000,
+        "blat_triple": 8_000,
+        "diplo_cd": 50_000,
+        "gov_reserve": 10_000,
+        "gov_pool": 3_000,
+    }
+    kind_bonus = {
+        "fso": 50_000,
+        "diplomatic": 50_000,
+        "military": 24_000,
+        "mvd": 24_000,
+        "prosecutor": 24_000,
+        "mchs": 12_000,
+        "taxi": 0,
+        "transit": 0,
+    }
+
+    priced: list[Specialty] = []
+    for item in detected:
+        amount = bonus_by_id.get(item.id, 0)
+        if amount:
+            priced.append(Specialty(item.id, item.title, float(amount), item.emoji, item.reason))
+    kind_amount = kind_bonus.get(plate.kind, 0)
+    if kind_amount:
+        kind = PLATE_KINDS[plate.kind]
+        priced.append(
+            Specialty(f"kind_{plate.kind}", kind.title, float(kind_amount), kind.emoji, KIND_REASONS.get(plate.kind, ""))
+        )
+
+    if (
+        tier == 1
+        and plate.kind == KIND_CIVILIAN
+        and plate.digits[0] == plate.digits[1] == plate.digits[2]
+        and f"{plate.letter2}{plate.letter3}" == "МО"
+    ):
+        priced.append(Specialty("moscow_government", "Мэрия Москвы", 24_000.0, "🏛"))
+    if plate.kind == KIND_CIVILIAN and plate.letter1 == "М" and plate.letter2 == plate.letter3 == "М":
+        priced.append(Specialty("former_mvd", "Ранее МВД, сейчас в основном частники", 24_000.0, "🚔"))
+    if (
+        plate.kind == KIND_CIVILIAN
+        and plate.digits[0] == plate.digits[1] == plate.digits[2]
+        and plate.letter1 == plate.letter2 == plate.letter3
+    ):
+        priced.append(Specialty("full_plate", "Фуллблат: все цифры и буквы одинаковые", 24_000.0, "🏆"))
+
+    if any(item.id == "triple_letter" for item in detected):
+        priced = [item for item in priced if item.id != "twin_letters"]
+
+    if plate.kind == "taxi":
+        found = {item.id for item in detected}
+        priced = []
+        if "sequence_asc" in found or "sequence_desc" in found:
+            sequence_bonus = 200 if "twin_letters" in found else 100
+            priced.append(Specialty("sequence", "Цифры подряд", float(sequence_bonus), "📈"))
+        if "twin_letters" in found:
+            priced.append(Specialty("twin_letters", "Две одинаковые буквы", 2_900.0, "🔤"))
+        if "triple" in found:
+            priced.append(Specialty("triple", "Три одинаковые цифры", 2_796.0, "🔥"))
+        if "triple" in found and "twin_letters" in found:
+            priced.append(Specialty("taxi_full_combo", "Полный такси-комбо", 3_554.0, "🏆"))
+
+    specs = tuple(priced)
+    combination_bonus = sum(int(item.multiplier) for item in specs)
+    if plate.kind == "taxi":
+        found = {item.id for item in detected}
+        if "triple" in found and "twin_letters" in found:
+            rarity = RARITY_LEGENDARY
+        elif "triple" in found:
+            rarity = RARITY_EPIC
+        elif "twin_letters" in found and ("sequence_asc" in found or "sequence_desc" in found):
+            rarity = RARITY_RARE
+        elif "twin_letters" in found or "sequence_asc" in found or "sequence_desc" in found:
+            rarity = RARITY_UNCOMMON
+        else:
+            rarity = RARITY_COMMON
+    else:
+        rarity = determine_rarity(plate, specs, float(combination_bonus))
+    combo_mult = 3.38 if rarity.id == "legendary" else 1.5 if rarity.id in ("rare", "epic") else 1.0
+    region_mult = region_multiplier(plate.region_code)
+    code_mult = (
+        REGION_CODE_MULT["two_digit"]
+        if len(plate.region_code) <= 2
+        else REGION_CODE_MULT["repeated"]
+        if len(set(plate.region_code)) == 1
+        else REGION_CODE_MULT["three_digit"]
+    )
+    kind_mult = 2.0 if plate.kind == "taxi" else 1.0
+    class_mult = RARITY_CLASS_MULT[rarity.id]
+    total_mult = combo_mult * region_mult * code_mult * kind_mult * class_mult
 
     from game_config import cfg
 
-    region_mult = REGION_SELL_MULT.get(tier, 1.0)
-    rarity = determine_rarity(plate, specs, mult)
-    sell = int(base * mult * region_mult * cfg().sell_price_multiplier)
+    sell = int((base + combination_bonus) * total_mult * cfg().sell_price_multiplier)
     sell = max(sell, 10)
-    if rarity.id == RARITY_LEGENDARY.id:
-        sell *= LEGENDARY_PRICE_MULTIPLIER
 
     return PlateEvaluation(
         plate=plate,
         region=region,
         specialties=specs,
         base_value=base,
-        total_multiplier=mult,
+        combination_bonus=combination_bonus,
+        combo_multiplier=combo_mult,
+        region_multiplier=region_mult,
+        code_multiplier=code_mult,
+        kind_multiplier=kind_mult,
+        class_multiplier=class_mult,
+        total_multiplier=total_mult,
         sell_price=sell,
         rarity=rarity,
     )
@@ -594,6 +714,14 @@ _PARSE_DIPLO_RE = re.compile(
 )
 _PARSE_MIL_RE = re.compile(
     r"^\s*(\d{4})\s*([авекмнорстухАВЕКМНОРСТУХ]{2})\s*(\d{2,3})\s*$",
+    re.IGNORECASE,
+)
+_PARSE_TAXI_RE = re.compile(
+    r"^\s*([авекмнорстухАВЕКМНОРСТУХ]{2})\s*(\d{3})\s*(\d{2,3})\s*$",
+    re.IGNORECASE,
+)
+_PARSE_TRANSIT_RE = re.compile(
+    r"^\s*Т\s*([авекмнорстухАВЕКМНОРСТУХ]{2})\s*(\d{3})\s*(\d{2,3})\s*$",
     re.IGNORECASE,
 )
 
@@ -638,6 +766,24 @@ def parse_plate_text(text: str) -> Plate | None:
             digits, tail, region = m.groups()
             return Plate("", digits, tail[0].upper(), tail[1].upper(), region, kind="military")
 
+    if kind == "transit" or body.startswith("Т "):
+        m = _PARSE_TRANSIT_RE.match(body)
+        if m:
+            tail, digits, region = m.groups()
+            return Plate("Т", digits, tail[0].upper(), tail[1].upper(), region, kind="transit")
+
+    if kind == "taxi":
+        m = _PARSE_TAXI_RE.match(body)
+        if m:
+            tail, digits, region = m.groups()
+            return Plate("", digits, tail[0].upper(), tail[1].upper(), region, kind="taxi")
+
+    if kind == KIND_CIVILIAN:
+        m = _PARSE_TAXI_RE.match(body)
+        if m:
+            tail, digits, region = m.groups()
+            return Plate("", digits, tail[0].upper(), tail[1].upper(), region, kind="taxi")
+
     m = _PARSE_COMPACT_RE.match(body) or _PARSE_RE.match(body)
     if not m:
         return None
@@ -678,31 +824,25 @@ def plate_from_storage_key(key: str) -> Plate | None:
 def format_evaluation(ev: PlateEvaluation) -> str:
     region_name = ev.region.name if ev.region else "Неизвестный регион"
     kind = ev.plate.kind_info()
-    tier = ev.region.tier if ev.region else 3
-    region_mult = REGION_SELL_MULT.get(tier, 1.0)
     lines = [
         f"{rarity_badge(ev.rarity)} · <b>{ev.plate.formatted()}</b>",
         f"📂 Тип: {kind.emoji} <b>{kind.title}</b>",
         f"📍 {region_name} ({ev.plate.region_code})",
         "",
-        f"База региона: <b>{ev.base_value}</b> ₽",
-        f"Регион: <b>×{region_mult:.2f}</b> (престиж кода {ev.plate.region_code})",
-        f"Итоговый множитель комбо: <b>×{ev.total_multiplier:.2f}</b>",
+        f"Базовая стоимость: <b>{ev.base_value}</b> ₽",
     ]
-    if ev.rarity.id == RARITY_LEGENDARY.id:
-        lines.append(
-            f"🏆 Легендарная редкость: <b>×{LEGENDARY_PRICE_MULTIPLIER}</b> к цене"
-        )
-    lines.append(f"💵 Продажа: <b>{ev.sell_price}</b> ₽")
-    combo_specs = [s for s in ev.specialties if not s.id.startswith("kind_")]
-    kind_specs = [s for s in ev.specialties if s.id.startswith("kind_")]
-    if kind_specs or combo_specs:
+    if ev.specialties:
         lines.append("")
-        lines.append("<b>За что иксы</b> (все перемножаются):")
-        for s in kind_specs + combo_specs:
+        lines.append("<b>Комбинации</b>")
+        for s in ev.specialties:
             why = f" — {s.reason}" if s.reason else ""
-            lines.append(f"{s.emoji} {s.title} <b>×{s.multiplier:g}</b>{why}")
-    else:
-        lines.append("")
-        lines.append("Обычный номер — нет комбо букв, цифр и спецсерии, иксы не начислены.")
+            lines.append(f"{s.emoji} {s.title} <b>+{int(s.multiplier):,} ₽</b>{why}".replace(",", " "))
+    lines.extend(
+        [
+            "",
+            f"Комбо ×{ev.combo_multiplier:g} · регион ×{ev.region_multiplier:g} · "
+            f"код ×{ev.code_multiplier:g} · тип ×{ev.kind_multiplier:g} · класс ×{ev.class_multiplier:g}",
+            f"💵 Цена номера: <b>{ev.sell_price:,}</b> ₽".replace(",", " "),
+        ]
+    )
     return "\n".join(lines)

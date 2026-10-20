@@ -28,8 +28,10 @@ from admin_panel import admin_router, init_admin_panel, is_admin
 from game_config import global_spin_cost, init_game_config
 from proxy import resolve_bot_session
 from regions import (
+    REGIONAL_GUARANTEE_MULTIPLIER,
     UNIQUE_REGIONS,
     get_region,
+    region_multiplier,
     spin_cost_for_region,
 )
 from leaderboard import format_leaderboard
@@ -102,7 +104,7 @@ def region_choice_label(code: str | None) -> str:
     region = get_region(code or "")
     if region is None:
         return "🌍 Все регионы"
-    return f"{region.name} ({region.code})"
+    return region.name
 
 
 def main_menu_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
@@ -143,13 +145,20 @@ def region_list_keyboard(page: int) -> InlineKeyboardMarkup:
             ]
         )
     for region in chunk:
-        cost = spin_cost_for_region(region.code)
+        multiplier = region_multiplier(region.code)
+        region_label = f"{region.name} · ×{multiplier:.2f}"
+        if len(region_label) > 64:
+            region_label = f"{region.name[:55].rstrip()}… · ×{multiplier:.2f}"
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{region.code} · {region.name} ({cost} ₽)",
+                    text=region_label,
                     callback_data=f"pick:{region.code}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="Коды: " + " ".join(region.registration_codes),
+                    callback_data=f"pick:{region.code}",
+                ),
             ]
         )
     nav: list[InlineKeyboardButton] = []
@@ -272,8 +281,9 @@ WELCOME = (
     "🇷🇺 <b>Генератор госномеров РФ</b>\n\n"
     "Крути рулетку, лови крутые комбо на цифрах и буквах, продавай номера и копи баланс.\n\n"
     "• <b>Крутить</b> — по умолчанию все регионы РФ, можно выбрать конкретный код.\n"
-    "• Чем престижнее регион, тем дороже прокрут.\n"
-    "• Стоимость продажи = база региона × тип номера × комбо на цифрах/буквах.\n"
+    "• Цена регионального прокрута = базовая пошлина × множитель региона × гарантия региона (×1,50).\n"
+    "• Множитель региона влияет и на стоимость номера.\n"
+    "• Цена номера учитывает регион, тип номера и комбинации цифр/букв.\n"
     "• В рулетке редко выпадают <b>спецномера</b> госорганов.\n"
 )
 
@@ -1238,13 +1248,22 @@ async def _spin_menu_text(user_id: int) -> str:
     cost = current_spin_cost(code)
     if is_all_regions(code):
         hint = "Номер выпадет со случайным кодом по всей РФ."
+        price_details = f"Базовая пошлина: <b>{global_spin_cost():,}</b> ₽".replace(",", " ")
     else:
         hint = "Будут генерироваться только номера выбранного региона."
+        base = global_spin_cost()
+        multiplier = region_multiplier(code or "")
+        price_details = (
+            f"Базовая пошлина: <b>{base:,}</b> ₽\n"
+            f"Множитель региона: <b>×{multiplier:.2f}</b>\n"
+            f"Гарантия региона: <b>×{REGIONAL_GUARANTEE_MULTIPLIER:.2f}</b>"
+        ).replace(",", " ")
     return (
         f"🎰 <b>Прокрут</b>\n"
         f"Регион: <b>{region_choice_label(code)}</b>\n"
-        f"Стоимость: <b>{cost}</b> ₽\n"
-        f"{hint}\n\n"
+        f"{price_details}\n"
+        + f"Стоимость генерации: <b>{cost:,}</b> ₽\n".replace(",", " ")
+        + f"{hint}\n\n"
         + await profile_line(user_id)
     )
 
@@ -1274,8 +1293,8 @@ async def cb_region_menu(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await callback.message.edit_text(
-        "Выберите регион прокрута. По умолчанию — <b>все регионы</b>.\n"
-        "Цена зависит от престижа кода.",
+        "Выберите регион прокрута. Код региона влияет на генерацию и цену номера.\n"
+        "Цена: базовая пошлина × множитель региона × гарантия региона (×1,50).",
         reply_markup=region_list_keyboard(0),
     )
 
@@ -1288,8 +1307,8 @@ async def cb_region_page(callback: CallbackQuery) -> None:
     page = int(callback.data.split(":")[1])
     await callback.answer()
     await callback.message.edit_text(
-        "Выберите регион прокрута. По умолчанию — <b>все регионы</b>.\n"
-        "Цена зависит от престижа кода.",
+        "Выберите регион прокрута. Код региона влияет на генерацию и цену номера.\n"
+        "Цена: базовая пошлина × множитель региона × гарантия региона (×1,50).",
         reply_markup=region_list_keyboard(page),
     )
 
@@ -1367,6 +1386,15 @@ async def _do_spin(callback: CallbackQuery) -> None:
 
     user_id = callback.from_user.id
     user = await storage.get(user_id)
+    from vault import collection_capacity
+
+    if len(storage.visible_collection(user)) >= collection_capacity(user.collection_level):
+        await callback.answer(
+            "Коллекция заполнена. Освободите место или улучшите коллекцию.",
+            show_alert=True,
+        )
+        return
+
     region_code = user.selected_region
     all_mode = is_all_regions(region_code)
     cost = current_spin_cost(region_code)
